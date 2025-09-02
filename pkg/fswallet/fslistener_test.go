@@ -31,7 +31,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func newEmptyWalletTestDir(t *testing.T, init bool) (context.Context, *fsWallet, chan ethtypes.Address0xHex, func()) {
+func newEmptyWalletTestDir(t *testing.T, init bool) (context.Context, *walletEthAddr, chan ethtypes.Address0xHex, func()) {
 	config.RootConfigReset()
 	logrus.SetLevel(logrus.TraceLevel)
 
@@ -50,7 +50,7 @@ func newEmptyWalletTestDir(t *testing.T, init bool) (context.Context, *fsWallet,
 		assert.NoError(t, err)
 	}
 
-	return ctx, ff.(*fsWallet), listener, func() {
+	return ctx, ff.(*walletEthAddr), listener, func() {
 		ff.Close()
 	}
 }
@@ -67,13 +67,14 @@ func TestFileListener(t *testing.T) {
 	testPWFIle, err := os.ReadFile("../../test/keystore_toml/1f185718734552d08278aa70f804580bab5fd2b4.pwd")
 	assert.NoError(t, err)
 
-	err = os.WriteFile(path.Join(f.conf.Path, "1f185718734552d08278aa70f804580bab5fd2b4.pwd"), testPWFIle, 0644)
+	conf := &f.gw.(*fsWallet).conf
+	err = os.WriteFile(path.Join(conf.Path, "1f185718734552d08278aa70f804580bab5fd2b4.pwd"), testPWFIle, 0644)
 	assert.NoError(t, err)
 
 	testKeyFIle, err := os.ReadFile("../../test/keystore_toml/1f185718734552d08278aa70f804580bab5fd2b4.key.json")
 	assert.NoError(t, err)
 
-	err = os.WriteFile(path.Join(f.conf.Path, "1f185718734552d08278aa70f804580bab5fd2b4.key.json"), testKeyFIle, 0644)
+	err = os.WriteFile(path.Join(conf.Path, "1f185718734552d08278aa70f804580bab5fd2b4.key.json"), testKeyFIle, 0644)
 	assert.NoError(t, err)
 
 	newAddr1 := <-listener1
@@ -93,7 +94,8 @@ func TestFileListenerStartFail(t *testing.T) {
 	ctx, f, _, done := newEmptyWalletTestDir(t, false)
 	defer done()
 
-	os.RemoveAll(f.conf.Path)
+	conf := &f.gw.(*fsWallet).conf
+	os.RemoveAll(conf.Path)
 	err := f.Initialize(ctx)
 	assert.Regexp(t, "FF22060", err)
 
@@ -101,7 +103,7 @@ func TestFileListenerStartFail(t *testing.T) {
 
 func TestFileListenerRemoveDirWhileListening(t *testing.T) {
 
-	ctx, f, _, done := newEmptyWalletTestDir(t, true)
+	ctx, ew, _, done := newEmptyWalletTestDir(t, true)
 	defer done()
 
 	errs := make(chan error, 1)
@@ -111,6 +113,7 @@ func TestFileListenerRemoveDirWhileListening(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 		cancelCtx()
 	}()
+	f := ew.gw.(*fsWallet)
 	f.fsListenerLoop(ctx, func() {}, make(chan fsnotify.Event), errs)
 
 }

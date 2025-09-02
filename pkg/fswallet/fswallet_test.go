@@ -30,9 +30,10 @@ import (
 	"github.com/hyperledger/firefly-signer/pkg/ethtypes"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func newTestRegexpFilenameOnlyWallet(t *testing.T, init bool) (context.Context, *fsWallet, func()) {
+func newTestRegexpFilenameOnlyWallet(t *testing.T, init bool) (context.Context, *walletEthAddr, func()) {
 	config.RootConfigReset()
 	logrus.SetLevel(logrus.TraceLevel)
 
@@ -51,12 +52,12 @@ func newTestRegexpFilenameOnlyWallet(t *testing.T, init bool) (context.Context, 
 		assert.NoError(t, err)
 	}
 
-	return ctx, ff.(*fsWallet), func() {
+	return ctx, ff.(*walletEthAddr), func() {
 		ff.Close()
 	}
 }
 
-func newTestTOMLMetadataWallet(t *testing.T, init bool) (context.Context, *fsWallet, func()) {
+func newTestTOMLMetadataWallet(t *testing.T, init bool) (context.Context, *walletEthAddr, func()) {
 	config.RootConfigReset()
 	logrus.SetLevel(logrus.TraceLevel)
 
@@ -75,7 +76,7 @@ func newTestTOMLMetadataWallet(t *testing.T, init bool) (context.Context, *fsWal
 		err = ff.Initialize(ctx)
 		assert.NoError(t, err)
 	}
-	return ctx, ff.(*fsWallet), func() {
+	return ctx, ff.(*walletEthAddr), func() {
 		ff.Close()
 	}
 }
@@ -95,7 +96,8 @@ func TestGetAccountSimpleFilenamesMissingPWD(t *testing.T) {
 	ctx, f, done := newTestRegexpFilenameOnlyWallet(t, true)
 	defer done()
 
-	f.conf.Filenames.PasswordExt = ".wrong"
+	conf := &f.gw.(*fsWallet).conf
+	conf.Filenames.PasswordExt = ".wrong"
 
 	_, err := f.getSignerForJSONAccount(ctx, json.RawMessage(`"0x1f185718734552d08278aa70f804580bab5fd2b4"`))
 	assert.Regexp(t, "FF22015", err)
@@ -164,7 +166,8 @@ func TestListAccountsBadDir(t *testing.T) {
 
 	ctx, f, done := newTestTOMLMetadataWallet(t, false)
 	defer done()
-	f.conf.Path = "!!!"
+	conf := &f.gw.(*fsWallet).conf
+	conf.Path = "!!!"
 	err := f.Initialize(ctx)
 	assert.Regexp(t, "FF22013", err)
 
@@ -275,7 +278,8 @@ func TestGetAccountBadYAML(t *testing.T) {
 
 	ctx, f, done := newTestTOMLMetadataWallet(t, true)
 	defer done()
-	f.conf.Metadata.Format = "yaml"
+	conf := &f.gw.(*fsWallet).conf
+	conf.Metadata.Format = "yaml"
 
 	_, err := f.getSignerForJSONAccount(ctx, json.RawMessage(`"0x1f185718734552d08278aa70f804580bab5fd2b4"`))
 	assert.Regexp(t, "FF22015", err)
@@ -296,7 +300,8 @@ func TestGetAccountBadJSON(t *testing.T) {
 
 	ctx, f, done := newTestTOMLMetadataWallet(t, true)
 	defer done()
-	f.conf.Metadata.Format = "json"
+	conf := &f.gw.(*fsWallet).conf
+	conf.Metadata.Format = "json"
 
 	_, err := f.getSignerForJSONAccount(ctx, json.RawMessage(`"0x1f185718734552d08278aa70f804580bab5fd2b4"`))
 	assert.Regexp(t, "FF22015", err)
@@ -342,9 +347,12 @@ func TestGetAccountBadTOMLRefKey(t *testing.T) {
 
 	ctx := context.Background()
 	ff, err := NewFilesystemWallet(ctx, ReadConfig(unitTestConfig))
-	defer ff.Close()
+	defer func() {
+		err := ff.Close()
+		require.NoError(t, err)
+	}()
 	assert.NoError(t, err)
-	f := ff.(*fsWallet)
+	f := ff.(*walletEthAddr)
 
 	_, err = f.getSignerForJSONAccount(ctx, json.RawMessage(`"0x1f185718734552d08278aa70f804580bab5fd2b4"`))
 	assert.Regexp(t, "FF22014", err)
@@ -359,9 +367,12 @@ func TestGetAccountNoTemplates(t *testing.T) {
 
 	ctx := context.Background()
 	ff, err := NewFilesystemWallet(ctx, ReadConfig(unitTestConfig))
-	defer ff.Close()
+	defer func() {
+		err := ff.Close()
+		require.NoError(t, err)
+	}()
 	assert.NoError(t, err)
-	f := ff.(*fsWallet)
+	f := ff.(*walletEthAddr)
 
 	_, err = f.getSignerForJSONAccount(ctx, json.RawMessage(`"0x1f185718734552d08278aa70f804580bab5fd2b4"`))
 	assert.Regexp(t, "FF22014", err)
@@ -369,71 +380,77 @@ func TestGetAccountNoTemplates(t *testing.T) {
 
 func TestGetAccountBadKeyfile(t *testing.T) {
 
-	ctx, f, done := newTestTOMLMetadataWallet(t, true)
+	ctx, ew, done := newTestTOMLMetadataWallet(t, true)
 	defer done()
+	f := ew.gw.(*fsWallet)
 	f.conf.Metadata.Format = "none" // tell it to read the TOML directly as a kv3
 	f.metadataPasswordFileProperty = nil
 	f.conf.DefaultPasswordFile = "../../test/keystore_toml/1f185718734552d08278aa70f804580bab5fd2b4.pwd"
 
-	_, err := f.getSignerForJSONAccount(ctx, json.RawMessage(`"0x1f185718734552d08278aa70f804580bab5fd2b4"`))
+	_, err := ew.getSignerForJSONAccount(ctx, json.RawMessage(`"0x1f185718734552d08278aa70f804580bab5fd2b4"`))
 	assert.Regexp(t, "FF22015", err)
 
 }
 
 func TestGetAccountBadDefaultPasswordfile(t *testing.T) {
 
-	ctx, f, done := newTestTOMLMetadataWallet(t, true)
+	ctx, ew, done := newTestTOMLMetadataWallet(t, true)
 	defer done()
+	f := ew.gw.(*fsWallet)
 	f.conf.Metadata.Format = "none" // tell it to read the TOML directly as a kv3
 	f.metadataPasswordFileProperty = nil
 	f.conf.DefaultPasswordFile = "!!!"
 
-	_, err := f.getSignerForJSONAccount(ctx, json.RawMessage(`"0x1f185718734552d08278aa70f804580bab5fd2b4"`))
+	_, err := ew.getSignerForJSONAccount(ctx, json.RawMessage(`"0x1f185718734552d08278aa70f804580bab5fd2b4"`))
 	assert.Regexp(t, "FF22015", err)
 
 }
 
 func TestGetAccountNoPassword(t *testing.T) {
 
-	ctx, f, done := newTestTOMLMetadataWallet(t, true)
+	ctx, ew, done := newTestTOMLMetadataWallet(t, true)
 	defer done()
+	f := ew.gw.(*fsWallet)
 	f.metadataPasswordFileProperty = nil
 
-	_, err := f.getSignerForJSONAccount(ctx, json.RawMessage(`"0x1f185718734552d08278aa70f804580bab5fd2b4"`))
+	_, err := ew.getSignerForJSONAccount(ctx, json.RawMessage(`"0x1f185718734552d08278aa70f804580bab5fd2b4"`))
 	assert.Regexp(t, "FF22015", err)
 
 }
 
 func TestGetAccountWrongPath(t *testing.T) {
 
-	ctx, f, done := newTestTOMLMetadataWallet(t, true)
+	ctx, ew, done := newTestTOMLMetadataWallet(t, true)
 	defer done()
+	f := ew.gw.(*fsWallet)
 	f.metadataPasswordFileProperty = nil
 
-	_, err := f.getSignerForJSONAccount(ctx, json.RawMessage(`"5d093e9b41911be5f5c4cf91b108bac5d130fa83"`))
+	_, err := ew.getSignerForJSONAccount(ctx, json.RawMessage(`"5d093e9b41911be5f5c4cf91b108bac5d130fa83"`))
 	assert.Regexp(t, "FF22015", err)
 
 }
 
 func TestGetAccountNotFound(t *testing.T) {
 
-	ctx, f, done := newTestTOMLMetadataWallet(t, true)
+	ctx, ew, done := newTestTOMLMetadataWallet(t, true)
 	defer done()
+	f := ew.gw.(*fsWallet)
 	f.conf.Metadata.Format = "none" // tell it to read the TOML directly as a kv3
 	f.metadataPasswordFileProperty = nil
 	f.conf.DefaultPasswordFile = "!!!"
 
-	_, err := f.getSignerForJSONAccount(ctx, json.RawMessage(`"0xFFFF5718734552d08278aa70f804580bab5fd2b4"`))
+	_, err := ew.getSignerForJSONAccount(ctx, json.RawMessage(`"0xFFFF5718734552d08278aa70f804580bab5fd2b4"`))
 	assert.Regexp(t, "FF22014", err)
 
 }
 
 func TestLoadKeyBadPath(t *testing.T) {
 
-	ctx, f, done := newTestRegexpFilenameOnlyWallet(t, false)
+	ctx, ew, done := newTestRegexpFilenameOnlyWallet(t, false)
 	defer done()
 
-	_, err := f.loadWalletFile(ctx, *ethtypes.MustNewAddress("0xFFFF5718734552d08278aa70f804580bab5fd2b4"), "../../test/keystore_toml/wrong.txt")
+	f := ew.gw.(*fsWallet)
+	_, err := f.loadWalletFile(ctx, "0xFFFF5718734552d08278aa70f804580bab5fd2b4", "../../test/keystore_toml/wrong.txt")
 	assert.Regexp(t, "FF22015", err)
 
 }

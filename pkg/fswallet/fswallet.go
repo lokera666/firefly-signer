@@ -32,33 +32,33 @@ import (
 	"github.com/hyperledger/firefly-common/pkg/i18n"
 	"github.com/hyperledger/firefly-common/pkg/log"
 	"github.com/hyperledger/firefly-signer/internal/signermsgs"
-	"github.com/hyperledger/firefly-signer/pkg/eip712"
-	"github.com/hyperledger/firefly-signer/pkg/ethsigner"
-	"github.com/hyperledger/firefly-signer/pkg/ethtypes"
 	"github.com/hyperledger/firefly-signer/pkg/keystorev3"
-	"github.com/hyperledger/firefly-signer/pkg/secp256k1"
 	"github.com/karlseguin/ccache"
 	"github.com/pelletier/go-toml"
 	"gopkg.in/yaml.v2"
 )
 
-type SyncAddressCallback func(context.Context, ethtypes.Address0xHex) error
+type SyncCallback func(context.Context, string) error
 
 // Wallet is a directory containing a set of KeystoreV3 files, conforming
 // to the ethsigner.Wallet interface and providing notifications when new
 // keys are added to the wallet (via FS listener).
-type Wallet interface {
-	ethsigner.WalletTypedData
-	GetWalletFile(ctx context.Context, addr ethtypes.Address0xHex) (keystorev3.WalletFile, error)
-	SetSyncAddressCallback(SyncAddressCallback)
-	AddListener(listener chan<- ethtypes.Address0xHex)
+type WalletGeneric interface {
+	Initialize(ctx context.Context) error
+	Refresh(ctx context.Context) error
+	Close() error
+
+	GetAccounts(ctx context.Context) ([]string, error)
+	GetWalletFile(ctx context.Context, addr string) (keystorev3.WalletFile, error)
+	SetSyncCallback(SyncCallback)
+	AddListener(listener chan<- string)
 }
 
-func NewFilesystemWallet(ctx context.Context, conf *Config, initialListeners ...chan<- ethtypes.Address0xHex) (ww Wallet, err error) {
+func NewFilesystemWalletGeneric(ctx context.Context, conf *ConfigGeneric, initialListeners ...chan<- string) (ww WalletGeneric, err error) {
 	w := &fsWallet{
 		conf:             *conf,
 		listeners:        initialListeners,
-		addressToFileMap: make(map[ethtypes.Address0xHex]string),
+		addressToFileMap: make(map[string]string),
 	}
 	w.signerCache = ccache.New(
 		// We use a LRU cache with a size-aware max
@@ -96,37 +96,21 @@ func goTemplateFromConfig(ctx context.Context, name string, templateStr string) 
 }
 
 type fsWallet struct {
-	conf                         Config
+	conf                         ConfigGeneric
 	signerCache                  *ccache.Cache
 	signerCacheTTL               time.Duration
 	metadataKeyFileProperty      *template.Template
 	metadataPasswordFileProperty *template.Template
 	primaryMatchRegex            *regexp.Regexp
-	syncAddressCallback          SyncAddressCallback
+	syncCallback                 SyncCallback
 
 	mux               sync.Mutex
-	addressToFileMap  map[ethtypes.Address0xHex]string // map for lookup to filename
-	addressList       []*ethtypes.Address0xHex         // ordered list in filename at startup, then notification order
-	listeners         []chan<- ethtypes.Address0xHex
+	addressToFileMap  map[string]string // map for lookup to filename
+	addressList       []string          // ordered list in filename at startup, then notification order
+	listeners         []chan<- string
 	fsListenerCancel  context.CancelFunc
 	fsListenerStarted chan error
 	fsListenerDone    chan struct{}
-}
-
-func (w *fsWallet) Sign(ctx context.Context, txn *ethsigner.Transaction, chainID int64) ([]byte, error) {
-	keypair, err := w.getSignerForJSONAccount(ctx, txn.From)
-	if err != nil {
-		return nil, err
-	}
-	return txn.Sign(keypair, chainID)
-}
-
-func (w *fsWallet) SignTypedDataV4(ctx context.Context, from ethtypes.Address0xHex, payload *eip712.TypedData) (*ethsigner.EIP712Result, error) {
-	keypair, err := w.getSignerForAddr(ctx, from)
-	if err != nil {
-		return nil, err
-	}
-	return ethsigner.SignTypedDataV4(ctx, keypair, payload)
 }
 
 func (w *fsWallet) Initialize(ctx context.Context) error {
@@ -144,7 +128,7 @@ func (w *fsWallet) Initialize(ctx context.Context) error {
 }
 
 // Asynchronously listen for all addresses as they are detected - during startup, or after startup
-func (w *fsWallet) AddListener(listener chan<- ethtypes.Address0xHex) {
+func (w *fsWallet) AddListener(listener chan<- string) {
 	w.mux.Lock()
 	defer w.mux.Unlock()
 	w.listeners = append(w.listeners, listener)
@@ -162,47 +146,54 @@ func (w *fsWallet) AddListener(listener chan<- ethtypes.Address0xHex) {
 // will be called concurrently. However, it is guaranteed to be called in-line with the
 // initialize/refresh so you know once that calls returns all new keys detected by it have
 // driven the callback.
-func (w *fsWallet) SetSyncAddressCallback(callback SyncAddressCallback) {
-	w.syncAddressCallback = callback
+func (w *fsWallet) SetSyncCallback(callback SyncCallback) {
+	w.syncCallback = callback
 }
 
 // GetAccounts returns the currently cached list of known addresses
-func (w *fsWallet) GetAccounts(_ context.Context) ([]*ethtypes.Address0xHex, error) {
+func (w *fsWallet) GetAccounts(_ context.Context) ([]string, error) {
 	w.mux.Lock()
 	defer w.mux.Unlock()
-	accounts := make([]*ethtypes.Address0xHex, len(w.addressList))
+	accounts := make([]string, len(w.addressList))
 	copy(accounts, w.addressList)
 	return accounts, nil
 }
 
-func (w *fsWallet) matchFilename(ctx context.Context, f fs.FileInfo) *ethtypes.Address0xHex {
+func (w *fsWallet) matchFilename(ctx context.Context, f fs.FileInfo) string {
 	if f.IsDir() {
 		log.L(ctx).Tracef("Ignoring '%s/%s: directory", w.conf.Path, f.Name())
-		return nil
+		return ""
 	}
 	if w.primaryMatchRegex != nil {
 		match := w.primaryMatchRegex.FindStringSubmatch(f.Name())
 		if match == nil {
 			log.L(ctx).Tracef("Ignoring '%s/%s': does not match regexp", w.conf.Path, f.Name())
-			return nil
+			return ""
 		}
-		addr, err := ethtypes.NewAddress(match[1]) // safe due to SubexpNames() length check
-		if err != nil {
-			log.L(ctx).Warnf("Ignoring '%s/%s': invalid address '%s': %s", w.conf.Path, f.Name(), match[1], err)
-			return nil
+		var err error
+		addrString := match[1]
+		if w.conf.AddressValidator != nil {
+			addrString, err = w.conf.AddressValidator(ctx, addrString)
+			if err != nil {
+				log.L(ctx).Warnf("Ignoring '%s/%s': invalid address '%s': %s", w.conf.Path, f.Name(), match[1], err)
+				return ""
+			}
 		}
-		return addr
+		return addrString
 	}
 	if !strings.HasSuffix(f.Name(), w.conf.Filenames.PrimaryExt) {
 		log.L(ctx).Tracef("Ignoring '%s/%s: does not match extension '%s'", w.conf.Path, f.Name(), w.conf.Filenames.PrimaryExt)
 	}
 	addrString := strings.TrimSuffix(f.Name(), w.conf.Filenames.PrimaryExt)
-	addr, err := ethtypes.NewAddress(addrString)
-	if err != nil {
-		log.L(ctx).Warnf("Ignoring '%s/%s': invalid address '%s': %s", w.conf.Path, f.Name(), addrString, err)
-		return nil
+	if w.conf.AddressValidator != nil {
+		var err error
+		addrString, err = w.conf.AddressValidator(ctx, addrString)
+		if err != nil {
+			log.L(ctx).Warnf("Ignoring '%s/%s': invalid address '%s': %s", w.conf.Path, f.Name(), addrString, err)
+			return ""
+		}
 	}
-	return addr
+	return addrString
 }
 
 func (w *fsWallet) Refresh(ctx context.Context) error {
@@ -221,16 +212,16 @@ func (w *fsWallet) Refresh(ctx context.Context) error {
 	return w.notifyNewFiles(ctx, files...)
 }
 
-func (w *fsWallet) processNewFiles(ctx context.Context, files ...fs.FileInfo) (listeners []chan<- ethtypes.Address0xHex, newAddresses []*ethtypes.Address0xHex) {
+func (w *fsWallet) processNewFiles(ctx context.Context, files ...fs.FileInfo) (listeners []chan<- string, newAddresses []string) {
 	// Lock now we have the list
 	w.mux.Lock()
 	defer w.mux.Unlock()
-	newAddresses = make([]*ethtypes.Address0xHex, 0)
+	newAddresses = make([]string, 0)
 	for _, f := range files {
 		addr := w.matchFilename(ctx, f)
-		if addr != nil {
-			if existingFilename, exists := w.addressToFileMap[*addr]; existingFilename != f.Name() {
-				w.addressToFileMap[*addr] = f.Name()
+		if addr != "" {
+			if existingFilename, exists := w.addressToFileMap[addr]; existingFilename != f.Name() {
+				w.addressToFileMap[addr] = f.Name()
 				if !exists {
 					log.L(ctx).Debugf("Added address: %s (file=%s)", addr, f.Name())
 					w.addressList = append(w.addressList, addr)
@@ -239,7 +230,7 @@ func (w *fsWallet) processNewFiles(ctx context.Context, files ...fs.FileInfo) (l
 			}
 		}
 	}
-	listeners = make([]chan<- ethtypes.Address0xHex, len(w.listeners))
+	listeners = make([]chan<- string, len(w.listeners))
 	copy(listeners, w.listeners)
 	log.L(ctx).Debugf("Processed %d files. Found %d new addresses", len(files), len(newAddresses))
 	return listeners, newAddresses
@@ -252,10 +243,10 @@ func (w *fsWallet) notifyNewFiles(ctx context.Context, files ...fs.FileInfo) err
 
 	if len(newAddresses) > 0 {
 
-		if w.syncAddressCallback != nil {
+		if w.syncCallback != nil {
 			// Sync callbacks are called here in-line, but outside the lock.
 			for _, addr := range newAddresses {
-				if err := w.syncAddressCallback(ctx, *addr); err != nil {
+				if err := w.syncCallback(ctx, addr); err != nil {
 					log.L(ctx).Errorf("sync listener returned error for address %s: %s", addr, err)
 					return err
 				}
@@ -267,7 +258,7 @@ func (w *fsWallet) notifyNewFiles(ctx context.Context, files ...fs.FileInfo) err
 			go func() {
 				for _, l := range listeners {
 					for _, addr := range newAddresses {
-						l <- *addr
+						l <- addr
 					}
 				}
 			}()
@@ -286,30 +277,8 @@ func (w *fsWallet) Close() error {
 	return nil
 }
 
-func (w *fsWallet) getSignerForJSONAccount(ctx context.Context, rawAddrJSON json.RawMessage) (*secp256k1.KeyPair, error) {
+func (w *fsWallet) GetWalletFile(ctx context.Context, addrString string) (keystorev3.WalletFile, error) {
 
-	// We require an ethereum address in the "from" field
-	var from ethtypes.Address0xHex
-	err := json.Unmarshal(rawAddrJSON, &from)
-	if err != nil {
-		return nil, err
-	}
-	return w.getSignerForAddr(ctx, from)
-}
-
-func (w *fsWallet) getSignerForAddr(ctx context.Context, from ethtypes.Address0xHex) (*secp256k1.KeyPair, error) {
-
-	wf, err := w.GetWalletFile(ctx, from)
-	if err != nil {
-		return nil, err
-	}
-	return wf.KeyPair(), nil
-
-}
-
-func (w *fsWallet) GetWalletFile(ctx context.Context, addr ethtypes.Address0xHex) (keystorev3.WalletFile, error) {
-
-	addrString := addr.String()
 	cached := w.signerCache.Get(addrString)
 	if cached != nil {
 		cached.Extend(w.signerCacheTTL)
@@ -317,28 +286,28 @@ func (w *fsWallet) GetWalletFile(ctx context.Context, addr ethtypes.Address0xHex
 	}
 
 	w.mux.Lock()
-	primaryFilename, ok := w.addressToFileMap[addr]
+	primaryFilename, ok := w.addressToFileMap[addrString]
 	w.mux.Unlock()
 	if !ok {
-		return nil, i18n.NewError(ctx, signermsgs.MsgWalletNotAvailable, addr)
+		return nil, i18n.NewError(ctx, signermsgs.MsgWalletNotAvailable, addrString)
 	}
 
-	kv3, err := w.loadWalletFile(ctx, addr, path.Join(w.conf.Path, primaryFilename))
+	kv3, err := w.loadWalletFile(ctx, addrString, path.Join(w.conf.Path, primaryFilename))
 	if err != nil {
 		return nil, err
 	}
 
-	keypair := kv3.KeyPair()
-	if keypair.Address != addr {
-		return nil, i18n.NewError(ctx, signermsgs.MsgAddressMismatch, keypair.Address, addr)
+	if w.conf.WalletFileValidator != nil {
+		if err := w.conf.WalletFileValidator(ctx, addrString, kv3); err != nil {
+			return nil, err
+		}
 	}
 
 	w.signerCache.Set(addrString, kv3, w.signerCacheTTL)
 	return kv3, err
-
 }
 
-func (w *fsWallet) loadWalletFile(ctx context.Context, addr ethtypes.Address0xHex, primaryFilename string) (keystorev3.WalletFile, error) {
+func (w *fsWallet) loadWalletFile(ctx context.Context, addr string, primaryFilename string) (keystorev3.WalletFile, error) {
 
 	b, err := os.ReadFile(primaryFilename)
 	if err != nil {
@@ -395,7 +364,7 @@ func (w *fsWallet) loadWalletFile(ctx context.Context, addr ethtypes.Address0xHe
 
 }
 
-func (w *fsWallet) getKeyAndPasswordFiles(ctx context.Context, addr ethtypes.Address0xHex, primaryFilename string, primaryFile []byte) (kf string, pf string, err error) {
+func (w *fsWallet) getKeyAndPasswordFiles(ctx context.Context, addr string, primaryFilename string, primaryFile []byte) (kf string, pf string, err error) {
 	if strings.ToLower(w.conf.Metadata.Format) == "auto" {
 		w.conf.Metadata.Format = strings.TrimPrefix(w.conf.Filenames.PrimaryExt, ".")
 	}
@@ -414,7 +383,7 @@ func (w *fsWallet) getKeyAndPasswordFiles(ctx context.Context, addr ethtypes.Add
 		if passwordPath == "" {
 			passwordPath = w.conf.Path
 		}
-		passwordFilename := addr.String()
+		passwordFilename := addr
 		if !w.conf.Filenames.With0xPrefix {
 			passwordFilename = strings.TrimPrefix(passwordFilename, "0x")
 		}
