@@ -17,7 +17,10 @@
 package fswallet
 
 import (
+	"context"
+
 	"github.com/hyperledger/firefly-common/pkg/config"
+	"github.com/hyperledger/firefly-signer/pkg/keystorev3"
 )
 
 const (
@@ -59,6 +62,12 @@ type Config struct {
 	DisableListener     bool
 	Filenames           FilenamesConfig
 	Metadata            MetadataConfig
+}
+
+type ConfigGeneric struct {
+	Config
+	WalletFileValidator func(ctx context.Context, addrString string, kv3 keystorev3.WalletFile) error
+	AddressValidator    func(ctx context.Context, addrString string) (string, error)
 }
 
 type FilenamesConfig struct {
