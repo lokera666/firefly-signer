@@ -136,9 +136,6 @@ func (k *KeyPair) SignDirect(message []byte) (ethSig *SignatureData, err error) 
 		return nil, fmt.Errorf("nil signer")
 	}
 	sig := ecdsa.SignCompact(k.PrivateKey, message, false) // uses S256() by default
-	if len(sig) < 65 {
-		return nil, fmt.Errorf("the signature is too short. sig: %x", sig)
-	}
 
 	// btcec does all the hard work for us. However, the interface of btcec is such
 	// that we need to unpack the result for Ethereum encoding.
@@ -147,6 +144,8 @@ func (k *KeyPair) SignDirect(message []byte) (ethSig *SignatureData, err error) 
 		R: new(big.Int),
 		S: new(big.Int),
 	}
+
+	// the returned signature is 65 bytes long
 	ethSig.V = ethSig.V.SetInt64(int64(sig[0]))
 	ethSig.R = ethSig.R.SetBytes(sig[1:33])
 	ethSig.S = ethSig.S.SetBytes(sig[33:65])
