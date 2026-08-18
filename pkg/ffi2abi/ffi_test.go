@@ -1103,3 +1103,108 @@ func TestInputTypeValidForTypeComponentInvalid(t *testing.T) {
 	tc, _ := param.TypeComponentTree()
 	assert.Regexp(t, "FF22055", inputTypeValidForTypeComponent(context.Background(), inputSchema, tc))
 }
+
+func TestConvertABIToFFIAnonymousParams(t *testing.T) {
+	// Solidity allows anonymous (unnamed) parameters, e.g. an interface-only
+	// override like `function grantRole(bytes32, address) external pure {}`.
+	// These must be given unique positional names in the FFI, otherwise all
+	// anonymous params collapse into a single param named "" downstream.
+	abiJSON := []byte(`[
+		{
+			"name": "grantRole",
+			"type": "function",
+			"stateMutability": "pure",
+			"inputs": [
+				{"internalType": "bytes32", "name": "", "type": "bytes32"},
+				{"internalType": "address", "name": "", "type": "address"}
+			],
+			"outputs": [
+				{"internalType": "bool", "name": "", "type": "bool"},
+				{"internalType": "uint256", "name": "", "type": "uint256"}
+			]
+		},
+		{
+			"name": "Granted",
+			"type": "event",
+			"inputs": [
+				{"internalType": "bytes32", "name": "", "type": "bytes32", "indexed": true},
+				{"internalType": "address", "name": "", "type": "address"}
+			]
+		},
+		{
+			"name": "BadRole",
+			"type": "error",
+			"inputs": [
+				{"internalType": "bytes32", "name": "", "type": "bytes32"},
+				{"internalType": "address", "name": "", "type": "address"}
+			]
+		}
+	]`)
+	var parsedABI abi.ABI
+	err := json.Unmarshal(abiJSON, &parsedABI)
+	assert.NoError(t, err)
+
+	ffi, err := ConvertABIToFFI(context.Background(), "default", "grantable", "v0.0.1", "test", &parsedABI)
+	assert.NoError(t, err)
+
+	assert.Len(t, ffi.Methods[0].Params, 2)
+	assert.Equal(t, "0", ffi.Methods[0].Params[0].Name)
+	assert.Equal(t, "1", ffi.Methods[0].Params[1].Name)
+	assert.Len(t, ffi.Methods[0].Returns, 2)
+	assert.Equal(t, "0", ffi.Methods[0].Returns[0].Name)
+	assert.Equal(t, "1", ffi.Methods[0].Returns[1].Name)
+	assert.Equal(t, "0", ffi.Events[0].Params[0].Name)
+	assert.Equal(t, "1", ffi.Events[0].Params[1].Name)
+	assert.Equal(t, "0", ffi.Errors[0].Params[0].Name)
+	assert.Equal(t, "1", ffi.Errors[0].Params[1].Name)
+
+	// The round-trip back to ABI keeps the positional encoding and type signature intact
+	abiMethod, err := ConvertFFIMethodToABI(context.Background(), ffi.Methods[0])
+	assert.NoError(t, err)
+	assert.Equal(t, "grantRole(bytes32,address)", ABIMethodToSignature(abiMethod))
+	assert.Equal(t, "bytes32", abiMethod.Inputs[0].Type)
+	assert.Equal(t, "address", abiMethod.Inputs[1].Type)
+}
+
+func TestConvertABIToFFIAnonymousTupleMembers(t *testing.T) {
+	// Anonymous members of a tuple must also get unique positional property
+	// names in the generated JSON schema, so they cannot overwrite each other
+	abiJSON := []byte(`[
+		{
+			"name": "setPair",
+			"type": "function",
+			"inputs": [
+				{
+					"internalType": "struct Pair",
+					"name": "pair",
+					"type": "tuple",
+					"components": [
+						{"internalType": "bytes32", "name": "", "type": "bytes32"},
+						{"internalType": "address", "name": "", "type": "address"}
+					]
+				}
+			],
+			"outputs": []
+		}
+	]`)
+	var parsedABI abi.ABI
+	err := json.Unmarshal(abiJSON, &parsedABI)
+	assert.NoError(t, err)
+
+	ffi, err := ConvertABIToFFI(context.Background(), "default", "pairs", "v0.0.1", "test", &parsedABI)
+	assert.NoError(t, err)
+
+	var schema Schema
+	err = json.Unmarshal(ffi.Methods[0].Params[0].Schema.Bytes(), &schema)
+	assert.NoError(t, err)
+	assert.Len(t, schema.Properties, 2)
+	assert.Equal(t, "bytes32", schema.Properties["0"].Details.Type)
+	assert.Equal(t, 0, *schema.Properties["0"].Details.Index)
+	assert.Equal(t, "address", schema.Properties["1"].Details.Type)
+	assert.Equal(t, 1, *schema.Properties["1"].Details.Index)
+
+	// The round-trip back to ABI reconstructs the tuple components in order
+	abiMethod, err := ConvertFFIMethodToABI(context.Background(), ffi.Methods[0])
+	assert.NoError(t, err)
+	assert.Equal(t, "setPair((bytes32,address))", ABIMethodToSignature(abiMethod))
+}

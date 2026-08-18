@@ -19,6 +19,7 @@ package ffi2abi
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	"github.com/hyperledger-firefly/common/pkg/fftypes"
@@ -135,6 +136,17 @@ func ConvertFFIErrorDefinitionToABI(ctx context.Context, errorDef *fftypes.FFIEr
 	return abiEntry, nil
 }
 
+// abiParamName returns the name of an ABI parameter, falling back to its positional
+// index for anonymous (unnamed) parameters. This matches the defaults used by the
+// abi package when parsing inputs and serializing outputs, and ensures FFI params
+// and generated JSON schemas have unique, non-empty property names.
+func abiParamName(name string, index int) string {
+	if name == "" {
+		return strconv.Itoa(index)
+	}
+	return name
+}
+
 func ConvertABIToFFI(ctx context.Context, ns, name, version, description string, abi *abi.ABI) (*fftypes.FFI, error) {
 	ffi := &fftypes.FFI{
 		Namespace:   ns,
@@ -186,7 +198,7 @@ func convertABIFunctionToFFIMethod(ctx context.Context, abiFunction *abi.Entry) 
 		}
 		schema := getSchemaForABIInput(ctx, typeComponent)
 		param := &fftypes.FFIParam{
-			Name:   input.Name,
+			Name:   abiParamName(input.Name, i),
 			Schema: fftypes.JSONAnyPtr(schema.ToJSON()),
 		}
 		params[i] = param
@@ -198,7 +210,7 @@ func convertABIFunctionToFFIMethod(ctx context.Context, abiFunction *abi.Entry) 
 		}
 		schema := getSchemaForABIInput(ctx, typeComponent)
 		param := &fftypes.FFIParam{
-			Name:   output.Name,
+			Name:   abiParamName(output.Name, i),
 			Schema: fftypes.JSONAnyPtr(schema.ToJSON()),
 		}
 		returns[i] = param
@@ -230,7 +242,7 @@ func convertABIEventToFFIEvent(ctx context.Context, abiEvent *abi.Entry) (*fftyp
 		}
 		schema := getSchemaForABIInput(ctx, typeComponent)
 		param := &fftypes.FFIParam{
-			Name:   output.Name,
+			Name:   abiParamName(output.Name, i),
 			Schema: fftypes.JSONAnyPtr(schema.ToJSON()),
 		}
 		params[i] = param
@@ -256,7 +268,7 @@ func convertABIErrorToFFIError(ctx context.Context, abiError *abi.Entry) (*fftyp
 		}
 		schema := getSchemaForABIInput(ctx, typeComponent)
 		param := &fftypes.FFIParam{
-			Name:   input.Name,
+			Name:   abiParamName(input.Name, i),
 			Schema: fftypes.JSONAnyPtr(schema.ToJSON()),
 		}
 		params[i] = param
@@ -317,7 +329,7 @@ func getSchemaForABIInput(ctx context.Context, typeComponent abi.TypeComponent) 
 			childSchema := getSchemaForABIInput(ctx, tupleChild)
 			childSchema.Details.Index = new(int)
 			*childSchema.Details.Index = i
-			schema.Properties[tupleChild.KeyName()] = childSchema
+			schema.Properties[abiParamName(tupleChild.KeyName(), i)] = childSchema
 		}
 	}
 	return schema
