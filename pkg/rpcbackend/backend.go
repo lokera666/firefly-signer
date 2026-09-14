@@ -153,12 +153,12 @@ func (rc *RPCClient) reserveConcurrencySlot(ctx context.Context, id any) (func()
 	case rc.concurrencySlots <- true:
 		waited := time.Since(start)
 		recordConcurrencySlotWait(ctx, waited)
-		log.L(ctx).Tracef("RPC[%v] acquired 1 of %d concurrency slots after %.3fms", id, cap(rc.concurrencySlots), float64(waited)/float64(time.Millisecond))
+		log.L(ctx).Tracef("RPC acquired 1 of %d concurrency slots after %.3fms", cap(rc.concurrencySlots), float64(waited)/float64(time.Millisecond))
 		return func() { <-rc.concurrencySlots }, nil
 	case <-ctx.Done():
 		waited := time.Since(start)
 		recordConcurrencySlotWaitFailed(ctx, waited)
-		log.L(ctx).Warnf("RPC[%v] gave up waiting for 1 of %d concurrency slots after %.3fms", id, cap(rc.concurrencySlots), float64(waited)/float64(time.Millisecond))
+		log.L(ctx).Warnf("RPC gave up waiting for 1 of %d concurrency slots after %.3fms", cap(rc.concurrencySlots), float64(waited)/float64(time.Millisecond))
 		err := i18n.NewError(ctx, signermsgs.MsgRequestCanceledContext, id)
 		return nil, &RPCError{Code: int64(RPCCodeInternalError), Message: err.Error()}
 	}
