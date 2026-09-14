@@ -32,6 +32,9 @@ const (
 	metricHistogramRPCRequestDurationMs = "rpc_request_duration_milliseconds"
 	metricHistogramRPCBatchSize         = "rpc_batch_size"
 
+	metricSummaryConcurrencySlotWaitMs     = "concurrency_slot_wait_milliseconds"
+	metricCounterConcurrencySlotWaitFailed = "concurrency_slot_wait_failed_total"
+
 	labelMethod = "method"
 	labelStatus = "status"
 	labelBatch  = "batch"
@@ -94,6 +97,24 @@ func EnableMetrics(ctx context.Context, metricsRegistry metric.MetricsRegistry) 
 	rpcMetrics.NewCounterMetricWithLabels(ctx, metricCounterRPCRequestTotal, "Total number of RPC backend requests", rpcRequestLabels, false)
 	rpcMetrics.NewHistogramMetricWithLabels(ctx, metricHistogramRPCRequestDurationMs, "Duration of RPC backend requests in milliseconds", rpcDurationMsBuckets, rpcDurationLabels, false)
 	rpcMetrics.NewHistogramMetric(ctx, metricHistogramRPCBatchSize, "Number of RPC calls per HTTP batch request", rpcBatchSizeBuckets, false)
+
+	rpcMetrics.NewSummaryMetric(ctx, metricSummaryConcurrencySlotWaitMs, "Time spent waiting for a concurrency slot in milliseconds", false)
+	rpcMetrics.NewCounterMetric(ctx, metricCounterConcurrencySlotWaitFailed, "Total number of requests that gave up waiting for a concurrency slot", false)
+}
+
+func recordConcurrencySlotWait(ctx context.Context, waited time.Duration) {
+	if rpcMetrics == nil {
+		return
+	}
+	rpcMetrics.ObserveSummaryMetric(ctx, metricSummaryConcurrencySlotWaitMs, durationMs(waited), nil)
+}
+
+func recordConcurrencySlotWaitFailed(ctx context.Context, waited time.Duration) {
+	if rpcMetrics == nil {
+		return
+	}
+	rpcMetrics.IncCounterMetric(ctx, metricCounterConcurrencySlotWaitFailed, nil)
+	rpcMetrics.ObserveSummaryMetric(ctx, metricSummaryConcurrencySlotWaitMs, durationMs(waited), nil)
 }
 
 func recordRPCRequest(ctx context.Context, method, status string, batch bool, duration time.Duration) {

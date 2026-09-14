@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/hyperledger-firefly/common/pkg/ffresty"
 	"github.com/hyperledger-firefly/common/pkg/fftypes"
@@ -650,4 +651,31 @@ func TestSyncRequestConcurrency(t *testing.T) {
 	close(blocked)
 	<-bgDone
 
+}
+
+func TestReserveConcurrencySlotWaitsForRelease(t *testing.T) {
+	ctx := context.Background()
+	rb := &RPCClient{concurrencySlots: make(chan bool, 1)}
+
+	release, rpcErr := rb.reserveConcurrencySlot(ctx, "first")
+	assert.Nil(t, rpcErr)
+	assert.Equal(t, 1, len(rb.concurrencySlots))
+
+	queued := make(chan struct{})
+	go func() {
+		defer close(queued)
+		release2, rpcErr := rb.reserveConcurrencySlot(ctx, "second")
+		assert.Nil(t, rpcErr)
+		release2()
+	}()
+
+	// The second reservation can only complete once the first slot is returned
+	select {
+	case <-queued:
+		t.Fatal("second reservation completed while the only slot was held")
+	case <-time.After(10 * time.Millisecond):
+	}
+	release()
+	<-queued
+	assert.Equal(t, 0, len(rb.concurrencySlots))
 }

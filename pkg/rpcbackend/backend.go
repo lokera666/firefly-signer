@@ -142,14 +142,23 @@ func (r *RPCResponseTyped[T]) Message() string {
 // as raw bytes in a fftypes.JSONAny for a second json.Unmarshal by the caller.
 type RPCResponse = RPCResponseTyped[*fftypes.JSONAny]
 
+// reserveConcurrencySlot blocks until an outbound concurrency slot is available, the context is
+// cancelled / times out. The returned function must be called to release the slot.
 func (rc *RPCClient) reserveConcurrencySlot(ctx context.Context, id any) (func(), *RPCError) {
 	if rc.concurrencySlots == nil {
 		return func() {}, nil
 	}
+	start := time.Now()
 	select {
 	case rc.concurrencySlots <- true:
+		waited := time.Since(start)
+		recordConcurrencySlotWait(ctx, waited)
+		log.L(ctx).Tracef("RPC acquired 1 of %d concurrency slots after %.3fms", cap(rc.concurrencySlots), float64(waited)/float64(time.Millisecond))
 		return func() { <-rc.concurrencySlots }, nil
 	case <-ctx.Done():
+		waited := time.Since(start)
+		recordConcurrencySlotWaitFailed(ctx, waited)
+		log.L(ctx).Warnf("RPC gave up waiting for 1 of %d concurrency slots after %.3fms", cap(rc.concurrencySlots), float64(waited)/float64(time.Millisecond))
 		err := i18n.NewError(ctx, signermsgs.MsgRequestCanceledContext, id)
 		return nil, &RPCError{Code: int64(RPCCodeInternalError), Message: err.Error()}
 	}

@@ -114,3 +114,26 @@ func TestStatusHelpers(t *testing.T) {
 	assert.Equal(t, "unknown", rpcMethodLabel(""))
 	assert.Equal(t, "eth_chainId", rpcMethodLabel("eth_chainId"))
 }
+
+func TestRecordConcurrencyNoOpWhenDisabled(t *testing.T) {
+	defer resetRPCMetrics()
+	ctx := context.Background()
+
+	assert.NotPanics(t, func() {
+		recordConcurrencySlotWait(ctx, time.Millisecond)
+		recordConcurrencySlotWaitFailed(ctx, time.Millisecond)
+	})
+}
+
+func TestRecordConcurrencyEmitWhenEnabled(t *testing.T) {
+	defer resetRPCMetrics()
+	ctx := context.Background()
+	mr := metric.NewPrometheusMetricsRegistry("test_rpcbackend_concurrency")
+	EnableMetrics(ctx, mr)
+
+	assert.NotPanics(t, func() {
+		recordConcurrencySlotWait(ctx, 0)
+		recordConcurrencySlotWait(ctx, 250*time.Millisecond)
+		recordConcurrencySlotWaitFailed(ctx, 30*time.Second)
+	})
+}
